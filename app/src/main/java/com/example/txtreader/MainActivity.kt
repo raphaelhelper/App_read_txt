@@ -1,5 +1,7 @@
 package com.example.txtreader
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,6 +9,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -22,6 +25,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val MAX_LEN = 2000 // dòng dài hơn sẽ được cắt thành nhiều đoạn
+        private const val MAX_COPY_LINES = 5000
+        private const val MAX_COPY_CHARS = 500_000
     }
 
     private lateinit var b: ActivityMainBinding
@@ -32,6 +37,12 @@ class MainActivity : AppCompatActivity() {
     private var curUri: Uri? = null
     private var matches = IntArray(0)
     private var cur = -1
+
+    private val backCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            clearSelection()
+        }
+    }
 
     private val picker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -55,9 +66,16 @@ class MainActivity : AppCompatActivity() {
         b.rv.layoutManager = lm
         b.rv.adapter = adapter
 
+        onBackPressedDispatcher.addCallback(this, backCallback)
+
+        adapter.onLineLongClick = { p -> startSelection(p) }
+        adapter.onLineClick = { p -> extendSelection(p) }
+
         b.btnOpen.setOnClickListener { picker.launch(arrayOf("*/*")) }
         b.btnNext.setOnClickListener { step(1) }
         b.btnPrev.setOnClickListener { step(-1) }
+        b.btnCopy.setOnClickListener { copySelection() }
+        b.btnCancel.setOnClickListener { clearSelection() }
         b.etSearch.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 hideKeyboard()
@@ -97,7 +115,9 @@ class MainActivity : AppCompatActivity() {
                 adapter.lines = res
                 adapter.query = ""
                 adapter.current = -1
-                adapter.notifyDataSetChanged()
+                adapter.selStart = -1
+                adapter.selEnd = -1
+                updateSelectionUi()
                 lm.scrollToPositionWithOffset(
                     startPos.coerceIn(0, maxOf(0, res.size - 1)), 0
                 )
@@ -177,6 +197,74 @@ class MainActivity : AppCompatActivity() {
         lm.scrollToPositionWithOffset(matches[i], 0)
         adapter.notifyDataSetChanged()
         b.tvStatus.text = "${i + 1}/${matches.size} kết quả"
+    }
+
+    // ---------- Chọn nhiều dòng để copy ----------
+
+    private fun startSelection(p: Int) {
+        adapter.selStart = p
+        adapter.selEnd = p
+        updateSelectionUi()
+    }
+
+    private fun extendSelection(p: Int) {
+        if (adapter.selStart < 0) return
+        adapter.selEnd = p
+        updateSelectionUi()
+    }
+
+    private fun clearSelection() {
+        adapter.selStart = -1
+        adapter.selEnd = -1
+        updateSelectionUi()
+    }
+
+    private fun updateSelectionUi() {
+        if (adapter.selStart < 0) {
+            b.selBar.visibility = View.GONE
+            backCallback.isEnabled = false
+        } else {
+            val n = kotlin.math.abs(adapter.selEnd - adapter.selStart) + 1
+            b.tvSel.text = "Đã chọn $n dòng"
+            b.selBar.visibility = View.VISIBLE
+            backCallback.isEnabled = true
+        }
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun copySelection() {
+        if (adapter.selStart < 0 || lines.isEmpty()) return
+        val lo = minOf(adapter.selStart, adapter.selEnd).coerceAtLeast(0)
+        var hi = maxOf(adapter.selStart, adapter.selEnd).coerceAtMost(lines.size - 1)
+        var truncated = false
+        if (hi - lo + 1 > MAX_COPY_LINES) {
+            hi = lo + MAX_COPY_LINES - 1
+            truncated = true
+        }
+        val sb = StringBuilder()
+        var copied = 0
+        for (i in lo..hi) {
+            if (sb.length + lines[i].length > MAX_COPY_CHARS) {
+                truncated = true
+                break
+            }
+            if (copied > 0) sb.append('\n')
+            sb.append(lines[i])
+            copied++
+        }
+        try {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("txt", sb.toString()))
+            val msg = if (truncated) {
+                "Đã copy $copied dòng (đã giới hạn độ dài)"
+            } else {
+                "Đã copy $copied dòng"
+            }
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            clearSelection()
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Đoạn quá lớn, chọn ngắn lại", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun hideKeyboard() {
